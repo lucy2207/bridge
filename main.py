@@ -1,10 +1,15 @@
+"""
+Bridge Cheater - main entry point
+Bridge bidding assistant (Five Card Major system)
+"""
 import math
 import customtkinter as ctk
 import bidding_engine as engine
 import play_engine as play
+import dds_engine
 
-# ----- "Card table felt" palette -----
-FELT_GREEN = "#237a3f"       # oval table surface
+# ----- "Card table felt" palette (sampled from reference image) -----
+FELT_GREEN = "#237a3f"       # brighter oval table surface
 FELT_GREEN_DARK = "#1c5c30"  # base background
 TEXTURE_LINE = "#17492a"     # diamond quilt line color
 GOLD = "#d4af37"
@@ -27,6 +32,7 @@ SUIT_SYMBOL = {"spades": "♠", "hearts": "♥", "diamonds": "♦", "clubs": "�
 SYMBOL_TO_SUITKEY = {v: k for k, v in SUIT_SYMBOL.items()}
 SUIT_COLOR = {"spades": BLACK_SUIT, "hearts": RED_SUIT, "diamonds": RED_SUIT, "clubs": BLACK_SUIT}
 RANK_ORDER = {r: i for i, r in enumerate(RANKS)}
+FULL_DECK = [(r, SUIT_SYMBOL[s]) for s in SUITS for r in RANKS]
 
 SEATS = ["north", "east", "south", "west"]
 PARTNER_SEAT = "north"   # you are always South, partner is always North
@@ -128,6 +134,8 @@ class BridgeCheaterApp(ctk.CTk):
         self.contract = None      # (level, strain, declarer_seat) or None
         self.dummy_seat = None
         self.dummy_hand = []      # dummy's 13 cards, once entered
+        self.north_hand = []      # partner's hand, only collected when partner is declaring
+        self.pending_entry = None  # (kind, seat) waiting to be entered before play starts
         self.tricks_won = {"NS": 0, "EW": 0}
         self.played_cards = {s: [] for s in SEATS}   # cards each seat has played this deal
         self.current_trick = []   # list of (seat, (rank, suit))
@@ -193,9 +201,9 @@ class WelcomeScreen(ctk.CTkFrame):
         exit_btn.place(relx=0.5, rely=0.62, anchor="center")
 
 
-# ================================================================
+# ============================================================
 #  SCREEN 2 - HAND SELECTION (13 cards, drawn as real card tiles)
-# ================================================================
+# ============================================================
 class HandSelectionScreen(ctk.CTkFrame):
     CARD_W, CARD_H = 50, 70
 
@@ -428,6 +436,11 @@ class TableScreen(ctk.CTkFrame):
     def on_show(self):
         self.controller.first_bidder = None
         self.controller.auction = []
+        self.controller.contract = None
+        self.controller.dummy_seat = None
+        self.controller.dummy_hand = []
+        self.controller.north_hand = []
+        self.controller.pending_entry = None
         self.selected_seat = None
         self.start_bidding_btn.configure(state="disabled")
         self.status_label.configure(text="Who bids first? Click on a player.")
@@ -603,22 +616,41 @@ class BiddingScreen(ctk.CTkFrame):
         self.play_btn.pack(side="left", padx=6)
 
         # Pack bottom-up so the bidding box and nav buttons always stay put
+        # and visible, no matter how tall the auction log or info panels get:
+        # nav_row claims the very bottom edge first, box claims the space
+        # just above it, and body (the scrollable panels) only gets whatever
+        # is left in the middle - it can never push the controls off-screen.
         nav_row.pack(pady=(0, 10), side="bottom")
         box.pack(pady=14, padx=16, side="bottom")
         body.pack(fill="both", expand=True, padx=16, pady=4, side="top")
 
     def _go_to_play(self):
-        contract = play.parse_contract(self.controller.auction)
-        if contract is None:
-            return
-        level, strain, declarer = contract
-        self.controller.contract = contract
-        self.controller.dummy_seat = play.dummy_of(declarer)
-        if self.controller.dummy_seat == "south":
-            self.controller.dummy_hand = list(self.controller.player_hand)
-            self.controller.show_frame("PlayScreen")
-        else:
-            self.controller.show_frame("DummyEntryScreen")
+        try:
+            contract = play.parse_contract(self.controller.auction)
+            if contract is None:
+                self.status_label.configure(text="No contract to play (hand was passed out).")
+                return
+            level, strain, declarer = contract
+            self.controller.contract = contract
+            self.controller.dummy_seat = play.dummy_of(declarer)
+            self.controller.north_hand = []
+            self.controller.pending_entry = None
+
+            if self.controller.dummy_seat == "south":
+                self.controller.dummy_hand = list(self.controller.player_hand)
+                if declarer == "north":
+                    # Partner is declaring - we don't actually know their hand,
+                    # so ask for it too and let the user play/get tips for both.
+                    self.controller.pending_entry = ("declarer", "north")
+            else:
+                self.controller.pending_entry = ("dummy", self.controller.dummy_seat)
+
+            if self.controller.pending_entry:
+                self.controller.show_frame("DummyEntryScreen")
+            else:
+                self.controller.show_frame("PlayScreen")
+        except Exception as exc:
+            self.status_label.configure(text=f"Couldn't start play: {exc}")
 
     # ---------------- logic ----------------
     def current_seat(self):
@@ -858,18 +890,31 @@ class DummyEntryScreen(ctk.CTkFrame):
         self.confirm_btn.configure(state="normal" if len(self.selected) == 13 else "disabled")
 
     def confirm_hand(self):
-        self.controller.dummy_hand = list(self.selected)
+        kind, seat = self.controller.pending_entry
+        if kind == "dummy":
+            self.controller.dummy_hand = list(self.selected)
+        else:
+            self.controller.north_hand = list(self.selected)
+        self.controller.pending_entry = None
         self.controller.show_frame("PlayScreen")
 
     def on_show(self):
         self.selected.clear()
         self.excluded = set(self.controller.player_hand)
+        if self.controller.dummy_hand and self.controller.pending_entry and self.controller.pending_entry[0] == "declarer":
+            self.excluded |= set(self.controller.dummy_hand)
         for key in self.tiles:
             self._render(key, hover=False)
         self.counter_label.configure(text="0 / 13 selected")
         self.confirm_btn.configure(state="disabled")
-        seat = self.controller.dummy_seat or "partner"
-        self.header.configure(text=f"Enter {seat.capitalize()}'s hand (the dummy)")
+        kind, seat = self.controller.pending_entry or ("dummy", self.controller.dummy_seat or "partner")
+        if kind == "dummy":
+            self.header.configure(text=f"Enter {seat.capitalize()}'s hand (the dummy)")
+        else:
+            self.header.configure(
+                text=f"Enter {seat.capitalize()}'s hand (your partner is declaring - "
+                     f"you'll get tips for their plays too)"
+            )
 
 
 # ============================================================
@@ -881,6 +926,7 @@ class PlayScreen(ctk.CTkFrame):
         self.controller = controller
         self.south_remaining = []
         self.dummy_remaining = []
+        self.north_remaining = None  # only set when partner (North) is declaring
         self.leader = None
         self.declarer = None
         self.dummy_seat = None
@@ -905,9 +951,27 @@ class PlayScreen(ctk.CTkFrame):
         )
         self.suggestion_label.pack(pady=(0, 6))
 
-        self.canvas = ctk.CTkCanvas(self, bg=FELT_GREEN_DARK, highlightthickness=0, height=380)
-        self.canvas.pack(fill="both", expand=True, padx=16)
+        table_row = ctk.CTkFrame(self, fg_color="transparent")
+        table_row.pack(fill="both", expand=True, padx=16)
+
+        self.canvas = ctk.CTkCanvas(table_row, bg=FELT_GREEN_DARK, highlightthickness=0, height=380)
+        self.canvas.pack(side="left", fill="both", expand=True)
         self.canvas.bind("<Configure>", lambda e: self._redraw())
+
+        self.info_panel = ctk.CTkFrame(table_row, fg_color=PANEL_BG, corner_radius=12, width=340)
+        self.info_panel.pack(side="right", fill="y", padx=(10, 0))
+        self.info_panel.pack_propagate(False)
+        ctk.CTkLabel(
+            self.info_panel, text="What we can infer",
+            font=ctk.CTkFont(size=14, weight="bold"), text_color=GOLD, wraplength=310,
+        ).pack(pady=(12, 6), padx=10)
+        inference_scroll = ctk.CTkScrollableFrame(self.info_panel, fg_color="transparent")
+        inference_scroll.pack(fill="both", expand=True, padx=6, pady=(0, 10))
+        self.inference_label = ctk.CTkLabel(
+            inference_scroll, text="", font=ctk.CTkFont(size=12), text_color=CREAM,
+            wraplength=300, justify="left",
+        )
+        self.inference_label.pack(padx=6, pady=4, anchor="n")
 
         self.input_frame = ctk.CTkFrame(self, fg_color=PANEL_BG, corner_radius=12)
         self.input_frame.pack(pady=10, padx=16, fill="x")
@@ -925,9 +989,14 @@ class PlayScreen(ctk.CTkFrame):
     def on_show(self):
         self.south_remaining = [(r, SUIT_SYMBOL[s]) for r, s in self.controller.player_hand]
         self.dummy_remaining = [(r, SUIT_SYMBOL[s]) for r, s in self.controller.dummy_hand]
+        self.north_remaining = (
+            [(r, SUIT_SYMBOL[s]) for r, s in self.controller.north_hand]
+            if self.controller.north_hand else None
+        )
         self.controller.tricks_won = {"NS": 0, "EW": 0}
         self.controller.played_cards = {s: [] for s in SEATS}
         self.controller.current_trick = []
+        self.known_voids = {s: set() for s in SEATS}
         level, strain, declarer = self.controller.contract
         self.trump = None if strain == "NT" else strain
         self.declarer = declarer
@@ -937,6 +1006,83 @@ class PlayScreen(ctk.CTkFrame):
         self._update_contract_label()
         self._redraw()
         self._update_input_panel()
+        self._update_inference_panel()
+
+    def _update_inference_panel(self):
+        original_south = [(r, SUIT_SYMBOL[s]) for r, s in self.controller.player_hand]
+        original_dummy = [(r, SUIT_SYMBOL[s]) for r, s in self.controller.dummy_hand]
+        original_north = (
+            [(r, SUIT_SYMBOL[s]) for r, s in self.controller.north_hand]
+            if self.controller.north_hand else []
+        )
+        all_known_cards = original_south + original_dummy + original_north
+
+        known_seats = {"south", self.dummy_seat}
+        if self.north_remaining is not None:
+            known_seats.add("north")
+        hidden_seats = [s for s in SEATS if s not in known_seats]
+        partner_hidden = "north" in hidden_seats
+
+        def hcp_of(cards):
+            return sum(engine.RANK_VALUES.get(r, 0) for r, _ in cards)
+
+        known_hcp = hcp_of(all_known_cards)
+        pool_hcp = 40 - known_hcp
+
+        lines = []
+        if partner_hidden:
+            pmin, pmax, psuits = engine.infer_partner_profile(self.controller.auction, "north")
+            opp_min = max(0, pool_hcp - pmax)
+            opp_max = min(pool_hcp, pool_hcp - pmin)
+            lines.append(f"Opponents: ~{opp_min}-{opp_max} HCP combined (partner's bidding suggests ~{pmin}-{pmax}).")
+        else:
+            lines.append(f"Opponents hold exactly {pool_hcp} HCP combined (both their hands unseen).")
+
+        lines.append("")
+        for suit_key in SUITS:
+            suit_sym = SUIT_SYMBOL[suit_key]
+            total_known = sum(1 for _, s in all_known_cards if s == suit_sym)
+            played_hidden = sum(
+                1 for seat in hidden_seats for (_, s) in self.controller.played_cards[seat] if s == suit_sym
+            )
+            unseen = 13 - total_known - played_hidden
+            if partner_hidden:
+                p_min_len = psuits.get(suit_sym, 0)
+                opp_max_len = max(0, unseen - p_min_len)
+                note = ""
+                if unseen > 0 and p_min_len >= max(unseen - 1, 1):
+                    note = " - opponents likely short"
+                lines.append(f"{suit_sym}: {unseen} unseen (partner {p_min_len}+, opponents ≤{opp_max_len}{note})")
+            else:
+                lines.append(f"{suit_sym}: opponents hold {unseen} between them")
+
+        void_lines = []
+        for seat in hidden_seats:
+            suits_void = self.known_voids.get(seat, set())
+            if suits_void:
+                void_lines.append(f"{seat.capitalize()} is void in: {', '.join(sorted(suits_void))}")
+        if void_lines:
+            lines.append("")
+            lines.extend(void_lines)
+
+        lines.append("")
+        lines.append("Cards played so far:")
+        played_by_suit = {suit_sym: [] for suit_sym in SUIT_SYMBOL.values()}
+        for seat in SEATS:
+            for rank, suit_sym in self.controller.played_cards[seat]:
+                played_by_suit[suit_sym].append(rank)
+        for seat, (rank, suit_sym) in self.controller.current_trick:
+            played_by_suit[suit_sym].append(rank)
+        for suit_key in SUITS:
+            suit_sym = SUIT_SYMBOL[suit_key]
+            ranks = played_by_suit[suit_sym]
+            if ranks:
+                ranks_sorted = sorted(ranks, key=lambda r: -RANK_ORDER[r])
+                lines.append(f"{suit_sym}: {' '.join(ranks_sorted)}")
+            else:
+                lines.append(f"{suit_sym}: none yet")
+
+        self.inference_label.configure(text="\n".join(lines))
 
     def _update_contract_label(self):
         level, strain, declarer = self.controller.contract
@@ -1026,6 +1172,8 @@ class PlayScreen(ctk.CTkFrame):
                 self._draw_known_hand(self.south_remaining, cx, cy, "You (South)")
             elif seat == self.dummy_seat:
                 self._draw_known_hand(self.dummy_remaining, cx, cy, f"{seat.capitalize()} (dummy)")
+            elif seat == "north" and self.north_remaining is not None:
+                self._draw_known_hand(self.north_remaining, cx, cy, "North (you play this too)")
             else:
                 remaining = 13 - len(self.controller.played_cards[seat])
                 self._draw_hidden_fan(seat, cx, cy, remaining)
@@ -1049,14 +1197,61 @@ class PlayScreen(ctk.CTkFrame):
             return self.south_remaining
         if seat == self.dummy_seat:
             return self.dummy_remaining
+        if seat == "north" and self.north_remaining is not None:
+            return self.north_remaining
         return None
 
     def _controls(self, seat):
-        return seat == "south" or (seat == self.dummy_seat and self.declarer == "south")
+        if seat == "south":
+            return True
+        if seat == self.dummy_seat and self.declarer == "south":
+            return True
+        if seat == "north" and self.declarer == "north" and self.north_remaining is not None:
+            return True
+        return False
+
+    def _dds_context(self):
+        """Everything the DDS engine needs: which hands we know exactly,
+        how many cards remain in the hands we don't, the pool of cards
+        that could still be in those hidden hands, and known voids."""
+        known_hands = {}
+        for seat in SEATS:
+            h = self._hand_for_seat(seat)
+            if h is not None:
+                known_hands[seat] = h
+        hidden_seats = [s for s in SEATS if s not in known_hands]
+        hidden_seat_counts = {s: 13 - len(self.controller.played_cards[s]) for s in hidden_seats}
+
+        accounted = set()
+        for cards in known_hands.values():
+            accounted.update(cards)
+        for seat in SEATS:
+            accounted.update(self.controller.played_cards[seat])
+        hidden_unseen_pool = [c for c in FULL_DECK if c not in accounted]
+
+        return known_hands, hidden_unseen_pool, hidden_seat_counts
+
+    def _get_suggestion(self, seat, hand, is_declaring_side):
+        """Tries the double-dummy simulation first; falls back to the
+        fixed-heuristic engine if endplay isn't installed or the solve
+        fails for any reason, so a bad/missing install never breaks play."""
+        try:
+            known_hands, hidden_pool, hidden_counts = self._dds_context()
+            return dds_engine.suggest_card_dds(
+                hand, self.controller.current_trick, self.trump, seat,
+                known_hands, hidden_pool, hidden_counts, self.known_voids,
+            )
+        except Exception as exc:
+            card, why = play.suggest_card(
+                hand, self.controller.current_trick, self.trump, seat,
+                is_declaring_side, self.known_voids,
+            )
+            return card, f"[heuristic - DDS unavailable: {exc}] {why}"
 
     def _update_input_panel(self):
         for w in self.input_frame.winfo_children():
             w.destroy()
+        self._update_inference_panel()
 
         seat = self._acting_seat()
         if seat is None:
@@ -1068,7 +1263,8 @@ class PlayScreen(ctk.CTkFrame):
             controls = self._controls(seat)
             suggestion_card = None
             if controls and hand:
-                suggestion_card, why = play.suggest_card(hand, self.controller.current_trick, self.trump)
+                is_declaring_side = play.partnership_of(seat) == play.partnership_of(self.declarer)
+                suggestion_card, why = self._get_suggestion(seat, hand, is_declaring_side)
                 if suggestion_card:
                     self.suggestion_label.configure(
                         text=f"Suggested: {suggestion_card[0]}{suggestion_card[1]}  —  {why}"
@@ -1089,6 +1285,8 @@ class PlayScreen(ctk.CTkFrame):
             self.suggestion_label.configure(text=f"Enter which card {seat.capitalize()} played.")
             played_all = [c for s in SEATS for c in self.controller.played_cards[s]]
             unavailable = set(self.south_remaining) | set(self.dummy_remaining) | set(played_all)
+            if self.north_remaining is not None:
+                unavailable |= set(self.north_remaining)
 
             grid = ctk.CTkFrame(self.input_frame, fg_color="transparent")
             grid.pack(pady=10)
@@ -1106,6 +1304,10 @@ class PlayScreen(ctk.CTkFrame):
     def _play_card(self, seat, card):
         if self.animating:
             return
+        if self.controller.current_trick:
+            led_suit = self.controller.current_trick[0][1][1]
+            if card[1] != led_suit:
+                self.known_voids[seat].add(led_suit)
         self.controller.current_trick.append((seat, card))
         self.controller.played_cards[seat].append(card)
         hand = self._hand_for_seat(seat)

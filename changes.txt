@@ -1,0 +1,34 @@
+game 1:
+faire tomber les atouts apres au plus vite
+- si peut couper commencer par ca 
+- methode sef
+
+game 7:
+- suggests bid I can no longer say (suggested 3 clubs when north already bid that just before)
+- need every new bid turn to take into account all previous bids, what these bids indicate about each 
+  player (probability of which cards/ how many points each player has), and my hand
+- bid issue: north bids 5 hearts on the third round of bids and the program suggests 3 hearts which is impossible
+- bid explanation from bridge.com: 
+N = north/ S = south
+    N: 1 heart 
+    -> at most 8 clubs, at most 8 diamonds, at least 5 hearts, at most 5 spades
+    -> 12-23 points - 'non forcing' bid 
+    S: 3 hearts (suggested)
+    -> at most 6 clubs, at most 6 diamonds, exactly 4 hearts, at most 5 spades
+    -> 8-10 points - 'non forcing' bid
+    N: 3 spades
+    -> at most 8 clubs, at most 8 diamonds, at least 5 hearts, at most 5 spades
+    -> 12-23 points - 'non forcing' bid 
+    -> a control in spades (ace, king, singleton or void), which implies necessarily having a fit in another suit. 
+       controls are shown at the lowest level
+    S: 4 spades (suggested)
+    -> at most 6 clubs, at most 6 diamonds, exactly 4 hearts, at most 5 spades
+    -> 8-10 points - 'non forcing' bid
+    -> this bid is not planned and therefore does not provide any new information
+    N: 4 hearts
+    -> at most 8 clubs, at most 8 diamonds, at least 5 hearts, at most 5 spades
+    -> 12-23 points - 'non forcing' bid 
+    -> a control issue in clubs (neither ace nor king nor singleton nor void)
+
+game 8:
+- second round bid: suggests 3 hearts however this would mean at least 6 hearts when I only have 5

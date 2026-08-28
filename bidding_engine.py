@@ -100,12 +100,31 @@ def suggest_raise(stats, suit):
         return None
     if hcp < 6:
         return "Pass", f"0-5 HCP: not enough to respond, even with {support}-card support."
+
+    jump_length_needed = 4 if suit in MAJORS else 5
+
     if hcp <= 9:
         return f"2{suit}", f"Simple raise: 6-9 HCP, {support}-card support."
     if hcp <= 12:
-        return f"3{suit}", f"Limit raise: 10-12 HCP, {support}-card support - invites game."
+        if support >= jump_length_needed:
+            return f"3{suit}", (
+                f"Limit raise (jump): 10-12 HCP, {support}-card support - a jump to the 3-level "
+                f"promises {jump_length_needed}+ cards, which you have."
+            )
+        return f"2{suit}", (
+            f"Simple raise: {hcp} HCP is good, but only {support}-card support - a jump raise needs "
+            f"{jump_length_needed}+, so raise to 2 instead and let partner know you have more if they ask."
+        )
     level = 4 if suit in MAJORS else 5
     return f"{level}{suit}", f"Game raise: 13+ HCP with {support}-card support."
+
+
+def _min_length_for_new_suit(level):
+    """The higher you introduce an unsupported suit for the first time, the
+    longer/stronger it needs to be to justify the commitment - a new suit
+    forced up to the 3-level or beyond should be a real 6-card suit, not
+    just the 4-5 cards that's fine at the 1- or 2-level."""
+    return 4 if level <= 2 else 6
 
 
 def suggest_new_suit_response(stats):
@@ -179,32 +198,146 @@ def _legal_min_level(auction, suit):
 def generic_fallback(stats, auction, my_seat, partner_seat):
     """Always returns a concrete call - used once the auction is more
     complex than the specific patterns above cover (later rounds,
-    competitive sequences beyond the first overcall, etc)."""
+    competitive sequences, continuing after a fit is found, etc).
+    Reasons from everything partner has shown across the WHOLE auction
+    (via infer_partner_profile), not just their most recent call, so a
+    hand doesn't get "re-evaluated" in isolation once the auction has
+    moved past round one."""
     hcp, lengths = stats["hcp"], stats["lengths"]
+    p_min, p_max, p_suits = infer_partner_profile(auction, partner_seat)
+    combined_min, combined_max = hcp + p_min, hcp + p_max
+
+    last_bid = next((b for _, b in reversed(auction) if b not in ("Pass", "X", "XX")), None)
+    last_level = int(last_bid[0]) if last_bid else 0
 
     partner_suit_bids = [b[1:] for s, b in auction if s == partner_seat and b not in ("Pass", "X", "XX")]
-    if partner_suit_bids:
-        suit = partner_suit_bids[-1]
+    fit_suit = None
+    for suit in reversed(partner_suit_bids):
         if suit != "NT" and lengths.get(suit, 0) >= 3:
-            raised = suggest_raise(stats, suit)
-            if raised:
-                return raised
+            fit_suit = suit
+            break
+
+    if fit_suit:
+        game_level = 4 if fit_suit in MAJORS else 5
+        if combined_min >= 25 and last_level < game_level:
+            return (
+                f"{game_level}{fit_suit}",
+                f"Combined strength looks like game (~{combined_min}-{combined_max} HCP with a "
+                f"{fit_suit} fit) - bid it.",
+            )
+        return (
+            "Pass",
+            f"You've already shown your hand; combined values (~{combined_min}-{combined_max} HCP) "
+            f"don't clearly justify bidding higher than what's already on the table.",
+        )
 
     if hcp < 6:
         return "Pass", f"{hcp} HCP: too few values to bid on."
 
-    candidates = [s for s in ("♠", "♥", "♦", "♣") if lengths[s] >= 5]
-    candidates.sort(key=lambda s: (-lengths[s], s not in MAJORS))
+    candidates = []
+    for s in ("♠", "♥", "♦", "♣"):
+        length = lengths[s]
+        if length < 4:
+            continue
+        level = _legal_min_level(auction, s)
+        if length >= _min_length_for_new_suit(level):
+            candidates.append((s, length, level))
+    candidates.sort(key=lambda t: (-t[1], t[0] not in MAJORS))
     if candidates:
-        suit = candidates[0]
-        level = _legal_min_level(auction, suit)
-        return f"{level}{suit}", f"{hcp} HCP with a {lengths[suit]}-card {suit} suit: bid it at the cheapest legal level."
+        suit, length, level = candidates[0]
+        return f"{level}{suit}", f"{hcp} HCP with a {length}-card {suit} suit: bid it at the cheapest legal level."
 
-    return "Pass", f"{hcp} HCP, no clear suit or fit to introduce: pass for now."
+    return "Pass", f"{hcp} HCP: no suit is both legal and long enough to introduce safely at this level."
+
+
+def call_constraints(seat, bid, auction_before):
+    """Structured version of explain_call: returns a dict of what a call
+    implies (hcp_min/hcp_max, suit + suit_min_len), or None if it doesn't
+    narrow anything reliably. Used to infer partner's likely shape during
+    the play phase, by intersecting constraints across all their calls."""
+    if bid in ("Pass", "X", "XX"):
+        if bid == "Pass" and all(b == "Pass" for _, b in auction_before):
+            return {"hcp_max": 11}
+        return None
+
+    level, strain = int(bid[0]), bid[1:]
+    is_opening = all(b == "Pass" for _, b in auction_before)
+    if is_opening:
+        if strain == "NT" and level == 1:
+            return {"hcp_min": 15, "hcp_max": 17}
+        if bid == "2♣":
+            return {"hcp_min": 23, "hcp_max": 37}
+        if level >= 2 and strain != "NT":
+            suit_len = {2: 6, 3: 7, 4: 8, 5: 9}.get(level)
+            if suit_len:
+                return {"hcp_min": 5, "hcp_max": 10, "suit": strain, "suit_min_len": suit_len}
+        if level == 1:
+            return {
+                "hcp_min": 12, "hcp_max": 17, "suit": strain,
+                "suit_min_len": 5 if strain in MAJORS else 3,
+            }
+        return None
+
+    same_seat_prior = [b for s, b in auction_before if s == seat and b not in ("Pass", "X", "XX")]
+    if same_seat_prior:
+        prior_strain = same_seat_prior[-1][1:]
+        if strain == prior_strain and strain != "NT":
+            return {"suit": strain, "suit_min_len": 3}
+
+    if strain == "NT":
+        return {"hcp_min": 6}
+    return {"suit": strain, "suit_min_len": 4, "hcp_min": 6}
+
+
+def infer_partner_profile(auction, partner_seat):
+    """Combines every call partner has made so far into one estimate:
+    (hcp_min, hcp_max, {suit: minimum known length})."""
+    calls = [(s, b) for s, b in auction if s == partner_seat]
+    hcp_min, hcp_max = 0, 37
+    suit_min = {"♠": 0, "♥": 0, "♦": 0, "♣": 0}
+    for i, (s, b) in enumerate(calls):
+        idx_in_auction = [j for j, (ss, _) in enumerate(auction) if ss == s][i]
+        c = call_constraints(s, b, auction[:idx_in_auction])
+        if not c:
+            continue
+        if "hcp_min" in c:
+            hcp_min = max(hcp_min, c["hcp_min"])
+        if "hcp_max" in c:
+            hcp_max = min(hcp_max, c["hcp_max"])
+        if "suit" in c and c["suit"] in suit_min:
+            suit_min[c["suit"]] = max(suit_min[c["suit"]], c.get("suit_min_len", 0))
+    return hcp_min, hcp_max, suit_min
+
+
+def _make_legal(auction, bid, why):
+    """Final safety net: never return a call that's actually illegal given
+    the whole auction so far. A gap of one level (e.g. an opponent's
+    overcall ate a rung of bidding space) gets bumped up in the same suit,
+    since that's still a sensible bid for the hand. A bigger gap (the
+    auction has moved well past what this simple rule was reasoning
+    about - like a partner who's since jumped to 5H) means the suggestion
+    is stale, not just squeezed - pass instead of guessing something wild."""
+    if bid in ("Pass", "X", "XX"):
+        return bid, why
+    level, strain = int(bid[0]), bid[1:]
+    min_level = _legal_min_level(auction, strain)
+    if min_level > level:
+        if min_level - level <= 1:
+            return f"{min_level}{strain}", why + " (bumped up one level to stay legal.)"
+        return "Pass", (
+            f"Your natural bid here would have been {bid}, but the auction has moved well past "
+            f"that ({min_level}{strain} or higher is now needed) - pass rather than overbid."
+        )
+    return bid, why
 
 
 def suggest_bid(hand, auction, my_seat, partner_seat):
     """auction: list of (seat, bid_str) so far. Always returns (bid, explanation)."""
+    bid, why = _suggest_bid_core(hand, auction, my_seat, partner_seat)
+    return _make_legal(auction, bid, why)
+
+
+def _suggest_bid_core(hand, auction, my_seat, partner_seat):
     stats = hand_stats(hand)
     opponents = [s for s in SEATS if s not in (my_seat, partner_seat)]
 
@@ -240,16 +373,10 @@ def suggest_bid(hand, auction, my_seat, partner_seat):
 
     # Case 5: partner opened, an opponent overcalled (not doubled), my first response.
     if partner_has_bid and not my_calls and opponents_have_bid:
-        bid, why = suggest_response_to_opening(stats, partner_calls[-1])
-        if bid not in ("Pass", "X", "XX"):
-            level, strain = int(bid[0]), bid[1:]
-            min_level = _legal_min_level(auction, strain)
-            if min_level > level:
-                bid = f"{min_level}{strain}"
-                why += " (bumped up to stay legal over their bid.)"
-        return bid, why
+        return suggest_response_to_opening(stats, partner_calls[-1])
 
-    # Fallback: later rounds / sequences not covered above - still concrete.
+    # Fallback: later rounds / sequences not covered above - still concrete,
+    # and reasons from everything partner has shown across the whole auction.
     return generic_fallback(stats, auction, my_seat, partner_seat)
 
 
@@ -287,10 +414,42 @@ def explain_call(seat, bid, auction_before):
         return f"Opening bid at the {level}-level in {strain}."
 
     same_seat_prior = [b for s, b in auction_before if s == seat and b not in ("Pass", "X", "XX")]
+    partner_seat = {"north": "south", "south": "north", "east": "west", "west": "east"}[seat]
+    partner_prior = [b for s, b in auction_before if s == partner_seat and b not in ("Pass", "X", "XX")]
+
     if same_seat_prior:
-        prior_strain = same_seat_prior[-1][1:]
-        if strain == prior_strain:
-            return f"Raise in {strain}: extra support and values for that suit."
+        # This seat has bid before - this is a REBID, not a first-time call.
+        # Check against everything they've shown so far, not just their most
+        # recent call, so returning to an earlier suit (e.g. 1H-3S-4H) is
+        # recognized as confirming that suit, not treated as a brand-new one.
+        prior_strains = [b[1:] for b in same_seat_prior]
+        is_jump = level > _legal_min_level(auction_before, strain)
+
+        if strain in prior_strains:
+            if is_jump:
+                return (
+                    f"Jump rebid in {strain}: extra length and extra strength (16-18+) - "
+                    f"invites game, more than a minimum opener would show."
+                )
+            return (
+                f"Rebid/return to {strain}: confirms that suit (often extra length there), "
+                f"around a fairly minimum hand (12-14) unless extra strength was already shown."
+            )
+        if strain == "NT":
+            level_range = {1: "12-14", 2: "18-19"}.get(level, "a balanced hand")
+            return f"Rebid in NT: balanced shape, about {level_range} HCP - describes points now that a suit's been shown."
+        if is_jump:
+            return (
+                f"Jump shift into {strain}: a strong second suit, well beyond minimum values - "
+                f"forcing, a big hand."
+            )
+        return f"Second suit shown ({strain}): natural, gives partner more shape information."
+
+    if partner_prior:
+        # Raising or supporting whatever partner has shown so far.
+        partner_last_strain = partner_prior[-1][1:]
+        if strain == partner_last_strain:
+            return f"Raise of partner's {strain}: support and extra values for that suit."
 
     # crude overcall/takeout-response heuristic: first call by this seat, after
     # an opponent's opening and no other bid from this partnership yet
