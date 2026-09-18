@@ -59,6 +59,76 @@ def tricks_needed_for_contract(level):
     return 6 + level
 
 
+def partner_bid_suit(auction, seat):
+    """The first real suit partner bid during the auction, if any - used
+    to prefer leading partner's suit on the opening lead."""
+    partner = partner_of(seat)
+    for s, b in auction:
+        if s == partner and b not in ("Pass", "X", "XX") and b[1:] != "NT":
+            return b[1:]
+    return None
+
+
+HONOR_RANKS = {"10", "J", "Q", "K", "A"}
+
+
+def _top_sequence_length(ranks_desc):
+    if not ranks_desc:
+        return 0
+    count = 1
+    for i in range(len(ranks_desc) - 1):
+        if RANK_VALUE[ranks_desc[i]] - RANK_VALUE[ranks_desc[i + 1]] == 1:
+            count += 1
+        else:
+            break
+    return count
+
+
+def _lead_card_in_suit(cards_in_suit):
+    """Standard opening-lead card selection within a chosen suit: top of a
+    (possibly broken) sequence, else fourth-best from a long suit, else
+    top of a doubleton, else low from a 3-card suit with an honor, else
+    top of nothing."""
+    ordered = sorted(cards_in_suit, key=lambda c: -RANK_VALUE[c[0]])
+    ranks_desc = [c[0] for c in ordered]
+    seq_len = _top_sequence_length(ranks_desc)
+    if seq_len >= 2:
+        return ordered[0], "top of your sequence"
+    if len(ordered) >= 4:
+        return ordered[3], "fourth-best"
+    if len(ordered) == 2:
+        return ordered[0], "top of your doubleton"
+    if len(ordered) == 3 and any(r in HONOR_RANKS for r in ranks_desc):
+        return ordered[-1], "low from your honor"
+    return ordered[0], "top of nothing"
+
+
+def _choose_opening_lead(hand, partner_suit):
+    """The very first card of the deal, played by the defender to
+    declarer's left. Prefers partner's bid suit; otherwise the longest
+    suit, using proper lead-card technique within whichever is chosen."""
+    suits_present = {s for _, s in hand}
+    if partner_suit and partner_suit in suits_present:
+        suit, source = partner_suit, "partner's suit"
+    else:
+        suit = max(suits_present, key=lambda s: sum(1 for _, s2 in hand if s2 == s))
+        source = "your longest suit"
+    cards_in_suit = [c for c in hand if c[1] == suit]
+    card, technique = _lead_card_in_suit(cards_in_suit)
+    return card, f"Opening lead: {technique} in {suit} ({source})."
+
+
+def _best_discard(hand, trump_strain):
+    """Prefer discarding from your shortest non-trump suit, to preserve
+    length (and any strength) in your longer suits."""
+    non_trump_suits = {s for _, s in hand if s != trump_strain}
+    if not non_trump_suits:
+        return min(hand, key=lambda c: RANK_VALUE[c[0]])
+    shortest = min(non_trump_suits, key=lambda s: sum(1 for _, s2 in hand if s2 == s))
+    candidates = [c for c in hand if c[1] == shortest]
+    return min(candidates, key=lambda c: RANK_VALUE[c[0]])
+
+
 def trick_winner(trick, trump_strain):
     """trick: list of (seat, (rank, suit)) in the order played."""
     led_suit = trick[0][1][1]
@@ -81,12 +151,17 @@ def trick_winner(trick, trump_strain):
     return best_seat
 
 
-def suggest_card(hand, trick_so_far, trump_strain, acting_seat, is_declaring_side=False, known_voids=None):
+def suggest_card(hand, trick_so_far, trump_strain, acting_seat, is_declaring_side=False,
+                  known_voids=None, is_opening_lead=False, partner_suit=None):
     """hand: remaining (rank, suit) cards for whoever is on play.
     trick_so_far: (seat, (rank, suit)) already played this trick, in order.
     acting_seat: whose turn it is (needed to know who's "partner" vs "opponent").
     known_voids: {seat: set(suits)} - suits a seat has already shown out of
     this deal, used to avoid leading into a hand that can ruff for free.
+    is_opening_lead / partner_suit: True and the auction's known suit,
+    respectively, only for the very first lead of the deal by a defender -
+    unlocks real opening-lead technique (partner's suit, sequences,
+    fourth-best) instead of the general "longest suit" leading rule.
     Returns (card, explanation).
 
     Follows real technique rather than just "win if you can":
@@ -105,6 +180,9 @@ def suggest_card(hand, trick_so_far, trump_strain, acting_seat, is_declaring_sid
     opponents = [s for s in SEATS if partnership_of(s) != partnership_of(acting_seat)]
 
     if not trick_so_far:
+        if is_opening_lead and not is_declaring_side:
+            return _choose_opening_lead(hand, partner_suit)
+
         suits_present = {s for _, s in hand}
 
         if trump_strain and is_declaring_side:
@@ -189,16 +267,16 @@ def suggest_card(hand, trick_so_far, trump_strain, acting_seat, is_declaring_sid
     if trumps:
         if trumped_by is not None:
             if partnership_of(trumped_by) == partnership_of(acting_seat):
-                card = min(hand, key=lambda c: RANK_VALUE[c[0]])
-                return card, "Partner already ruffed this trick - no need to overtrump, discard your lowest card."
+                card = _best_discard(hand, trump_strain)
+                return card, "Partner already ruffed this trick - no need to overtrump, discard from your shortest suit."
             higher = [c for c in trumps if RANK_VALUE[c[0]] > RANK_VALUE[best_trump[0]]]
             if higher:
                 card = min(higher, key=lambda c: RANK_VALUE[c[0]])
                 return card, "An opponent ruffed - overtrump as cheaply as possible to take it back."
-            card = min(hand, key=lambda c: RANK_VALUE[c[0]])
-            return card, "An opponent ruffed higher than you can beat - discard your lowest card instead."
+            card = _best_discard(hand, trump_strain)
+            return card, "An opponent ruffed higher than you can beat - discard from your shortest suit instead."
         card = min(trumps, key=lambda c: RANK_VALUE[c[0]])
         return card, "Out of the suit led - ruff with your lowest trump to take the trick."
 
-    card = min(hand, key=lambda c: RANK_VALUE[c[0]])
-    return card, "Can't follow suit or usefully trump - discard your lowest card."
+    card = _best_discard(hand, trump_strain)
+    return card, "Can't follow suit or usefully trump - discard from your shortest suit to keep your length elsewhere."

@@ -94,6 +94,31 @@ def suggest_opening(stats):
     return f"1{suit}", f"Opening bid: 12-17 HCP, {lengths[suit]} card{plural} in {suit}."
 
 
+def suggest_splinter(hand, stats, suit):
+    """Double jump-shift response to a major-suit opening: 4+ support, a
+    singleton or void (not headed by an ace/king) in another suit, and
+    about 13-15 points including distribution. Invites/forces slam."""
+    if suit not in MAJORS:
+        return None
+    lengths = stats["lengths"]
+    if lengths[suit] < 4:
+        return None
+    short_suits = [s for s in ("♠", "♥", "♦", "♣") if s != suit and lengths[s] <= 1]
+    for short in short_suits:
+        cards_in_short = [r for r, s in hand if s == short]
+        if cards_in_short and cards_in_short[0] in ("A", "K"):
+            continue
+        short_bonus = 5 if lengths[short] == 0 else 3
+        total = stats["hcp"] + short_bonus
+        if 13 <= total <= 15:
+            return f"4{short}", (
+                f"Splinter: {lengths[suit]}-card {suit} support with a "
+                f"{'void' if lengths[short] == 0 else 'singleton'} in {short} - "
+                f"about {total} points including distribution, invites slam."
+            )
+    return None
+
+
 def suggest_raise(stats, suit):
     hcp = stats["hcp"]
     support = stats["lengths"][suit]
@@ -213,6 +238,24 @@ def suggest_blackwood_response(hand):
     return bid, f"Blackwood response: {aces} ace{plural}."
 
 
+def suggest_gerber_response(hand):
+    aces = count_aces(hand)
+    bid = {0: "4♦", 1: "4♥", 2: "4♠", 3: "4NT", 4: "4♦"}[aces]
+    plural = "s" if aces != 1 else ""
+    return bid, f"Gerber response: {aces} ace{plural}."
+
+
+def _is_gerber_context(auction, partner_seat):
+    """4C is Gerber (asking for aces) specifically as a jump right after a
+    1NT/2NT opening - a natural club bid anywhere else is not Gerber."""
+    real_calls = [(s, b) for s, b in auction if b not in ("Pass", "X", "XX")]
+    if len(real_calls) < 2:
+        return False
+    if real_calls[0][1] not in ("1NT", "2NT"):
+        return False
+    return real_calls[-1] == (partner_seat, "4♣")
+
+
 def _is_blackwood_context(auction, my_seat, partner_seat):
     """4NT is Blackwood (asking for aces) once a trump fit is agreed - but
     a bare 4NT as the very first response to a 1NT/2NT opening is
@@ -244,7 +287,7 @@ def suggest_negative_double(stats, opener_suit, overcall_bid):
     return None
 
 
-def suggest_response_to_opening(stats, partner_bid):
+def suggest_response_to_opening(stats, partner_bid, hand=None):
     strain = partner_bid[1:]
     if strain == "NT" and partner_bid[0] == "1":
         return suggest_response_to_1nt(stats)
@@ -258,10 +301,75 @@ def suggest_response_to_opening(stats, partner_bid):
             return "2NT", "About 11-12 combined HCP feel: invites game."
         return "Pass", "Not enough to move past partner's 1NT."
     if strain in MAJORS:
+        if hand is not None:
+            splinter = suggest_splinter(hand, stats, strain)
+            if splinter:
+                return splinter
         raised = suggest_raise(stats, strain)
         if raised:
             return raised
     return suggest_new_suit_response(stats)
+
+
+def suggest_michaels(stats, opener_bid):
+    """Direct cuebid of opponent's opened suit: shows 5+/5+ in both majors
+    (over a minor) or the other major + an unspecified minor (over a
+    major). Most useful 0-10 HCP - two-suited shape matters more than
+    high cards here."""
+    hcp, lengths = stats["hcp"], stats["lengths"]
+    opener_level, opener_strain = int(opener_bid[0]), opener_bid[1:]
+    if opener_level != 1 or opener_strain == "NT" or hcp > 11:
+        return None
+    if opener_strain in MINORS:
+        if lengths["♠"] >= 5 and lengths["♥"] >= 5:
+            return f"2{opener_strain}", f"Michaels cuebid: {hcp} HCP, 5+/5+ in both majors."
+        return None
+    other_major = "♥" if opener_strain == "♠" else "♠"
+    if lengths[other_major] >= 5:
+        best_minor = max(MINORS, key=lambda s: lengths[s])
+        if lengths[best_minor] >= 5:
+            return f"2{opener_strain}", (
+                f"Michaels cuebid: {hcp} HCP, 5+ {other_major} and an unspecified 5+ minor "
+                f"(likely {best_minor})."
+            )
+    return None
+
+
+def suggest_unusual_2nt(stats, opener_bid):
+    """Direct jump to 2NT: shows the two lower-ranking unbid suits, 5+/5+,
+    one always a minor. Most useful 0-10 HCP."""
+    hcp, lengths = stats["hcp"], stats["lengths"]
+    opener_level, opener_strain = int(opener_bid[0]), opener_bid[1:]
+    if opener_level != 1 or opener_strain == "NT" or hcp > 11:
+        return None
+    shown = {
+        "♣": ("♦", "♥"), "♦": ("♣", "♥"), "♥": ("♣", "♦"), "♠": ("♣", "♦"),
+    }.get(opener_strain)
+    if shown and lengths[shown[0]] >= 5 and lengths[shown[1]] >= 5:
+        return "2NT", f"Unusual 2NT: {hcp} HCP, 5+/5+ in {shown[0]} and {shown[1]}."
+    return None
+
+
+def suggest_dont(stats):
+    """Responding to an opponent's 1NT opening. A one-suited hand (6+)
+    doubles (relay - partner bids 2C to ask); a two-suited hand (5-4+)
+    bids the cheaper of its two suits."""
+    hcp, lengths = stats["hcp"], stats["lengths"]
+    six_plus = [s for s in ("♠", "♥", "♦", "♣") if lengths[s] >= 6]
+    if six_plus:
+        suit = max(six_plus, key=lambda s: lengths[s])
+        if suit == "♠":
+            return "2♠", f"Natural: 6+ spades, shows this suit directly (stronger shape than Double-then-2S)."
+        return "X", f"DONT: single-suited hand, 6+ cards in {suit} - partner bids 2♣ to ask which suit."
+
+    two_suited = [s for s in ("♠", "♥", "♦", "♣") if lengths[s] >= 5]
+    if len(two_suited) >= 2:
+        two_suited.sort(key=lambda s: -lengths[s])
+        a, b = two_suited[0], two_suited[1]
+        cheapest = min((a, b), key=lambda s: STRAIN_RANK[s])
+        return f"2{cheapest}", f"DONT: two-suited hand ({a} and {b}, 5+ each) - shows {cheapest} and a higher unbid suit."
+
+    return None
 
 
 def suggest_overcall(stats, opener_bid):
@@ -269,6 +377,18 @@ def suggest_overcall(stats, opener_bid):
     hcp, lengths, balanced = stats["hcp"], stats["lengths"], stats["balanced"]
     opener_level = int(opener_bid[0])
     opener_strain = opener_bid[1:]
+
+    if opener_strain == "NT" and opener_level == 1:
+        dont = suggest_dont(stats)
+        if dont:
+            return dont
+
+    michaels = suggest_michaels(stats, opener_bid)
+    if michaels:
+        return michaels
+    unusual = suggest_unusual_2nt(stats, opener_bid)
+    if unusual:
+        return unusual
 
     shortness = lengths.get(opener_strain, 0) if opener_strain != "NT" else 99
     if opener_strain != "NT" and hcp >= 12 and shortness <= 2:
@@ -302,7 +422,59 @@ def _legal_min_level(auction, suit):
     return last_level + 1
 
 
-def generic_fallback(stats, auction, my_seat, partner_seat):
+def _controls_shown(auction, seat):
+    """Suits this seat has already cue-bid (shown a control in): any suit
+    bid at the 4-level or higher that isn't NT - a workable proxy without
+    fully tracking cue-bid sequences round by round."""
+    shown = set()
+    for s, b in auction:
+        if s != seat or b in ("Pass", "X", "XX"):
+            continue
+        level, strain = int(b[0]), b[1:]
+        if level >= 4 and strain != "NT":
+            shown.add(strain)
+    return shown
+
+
+def suggest_control_cue_bid(hand, auction, my_seat, partner_seat, trump_suit):
+    """Cheapest new control to show once a fit is agreed and slam is in
+    the picture: aces/voids (1st round) before kings/singletons (2nd
+    round), never the trump suit itself, never one already shown."""
+    already_shown = _controls_shown(auction, my_seat) | _controls_shown(auction, partner_seat)
+    already_shown.discard(trump_suit)
+
+    def control_level(suit):
+        cards = [r for r, s in hand if s == suit]
+        if not cards:
+            return 1
+        if "A" in cards:
+            return 1
+        if len(cards) == 1:
+            return 2
+        if "K" in cards:
+            return 2
+        return 0
+
+    candidates = []
+    for suit in ("♣", "♦", "♥", "♠"):
+        if suit == trump_suit or suit in already_shown:
+            continue
+        lvl = control_level(suit)
+        if lvl > 0:
+            candidates.append((suit, lvl))
+    if not candidates:
+        return None
+    candidates.sort(key=lambda c: (c[1], STRAIN_RANK[c[0]]))
+    suit, lvl = candidates[0]
+    control_word = "first-round (ace/void)" if lvl == 1 else "second-round (king/singleton)"
+    bid_level = _legal_min_level(auction, suit)
+    return f"{bid_level}{suit}", (
+        f"Control-showing cue-bid: {control_word} control in {suit} - cheapest new control, "
+        f"slam try with {trump_suit} agreed."
+    )
+
+
+def generic_fallback(hand, stats, auction, my_seat, partner_seat):
     """Always returns a concrete call - used once the auction is more
     complex than the specific patterns above cover (later rounds,
     competitive sequences, continuing after a fit is found, etc).
@@ -326,6 +498,19 @@ def generic_fallback(stats, auction, my_seat, partner_seat):
 
     if fit_suit:
         game_level = 4 if fit_suit in MAJORS else 5
+        already_cue_bidding = last_bid is not None and last_level >= game_level and last_bid[1:] != fit_suit
+        slam_zone = combined_min >= 30 and last_level < 6
+
+        if slam_zone or already_cue_bidding:
+            cue = suggest_control_cue_bid(hand, auction, my_seat, partner_seat, fit_suit)
+            if cue:
+                return cue
+            if already_cue_bidding:
+                return (
+                    f"{game_level}{fit_suit}" if last_level < game_level else "Pass",
+                    f"No new control to show - return to {fit_suit} to discourage a slam try.",
+                )
+
         if combined_min >= 25 and last_level < game_level:
             return (
                 f"{game_level}{fit_suit}",
@@ -390,6 +575,16 @@ def call_constraints(seat, bid, auction_before):
         prior_strain = same_seat_prior[-1][1:]
         if strain == prior_strain and strain != "NT":
             return {"suit": strain, "suit_min_len": 3}
+
+    partner_seat = PARTNER_OF.get(seat)
+    partner_prior_here = [b for s, b in auction_before if s == partner_seat and b not in ("Pass", "X", "XX")]
+    if partner_prior_here and partner_prior_here[0][1:] == strain and strain != "NT":
+        min_legal = _legal_min_level(auction_before, strain)
+        if level > min_legal:
+            if level >= (4 if strain in MAJORS else 5):
+                return {"hcp_min": 13, "suit": strain, "suit_min_len": 4 if strain in MAJORS else 5}
+            return {"hcp_min": 10, "hcp_max": 12, "suit": strain, "suit_min_len": 4 if strain in MAJORS else 5}
+        return {"hcp_min": 6, "hcp_max": 9, "suit": strain, "suit_min_len": 3}
 
     if strain == "NT":
         return {"hcp_min": 6}
@@ -477,9 +672,17 @@ def _suggest_bid_core(hand, auction, my_seat, partner_seat):
     if partner_calls and partner_calls[-1] == "4NT" and _is_blackwood_context(auction, my_seat, partner_seat):
         return suggest_blackwood_response(hand)
 
-    # Case 2: partner opened, no interference from opponents -> plain response.
-    if partner_has_bid and not opponents_have_bid and partner_calls[-1] != "Pass":
-        return suggest_response_to_opening(stats, partner_calls[-1])
+    # Case 1d: partner just asked Gerber (4C right after a 1NT/2NT opening).
+    if _is_gerber_context(auction, partner_seat):
+        return suggest_gerber_response(hand)
+
+    # Case 2: partner opened, no interference from opponents, and this is
+    # genuinely my first call -> plain response. (If I've already bid
+    # before, this is MY rebid after partner's raise, not a response to
+    # an opening - that belongs in the fallback below, which knows how
+    # to reason about a fit already found, including cue-bidding.)
+    if partner_has_bid and not opponents_have_bid and partner_calls[-1] != "Pass" and not my_calls:
+        return suggest_response_to_opening(stats, partner_calls[-1], hand)
 
     # Case 3: it's my first call, and an opponent opened before partner did anything.
     if not my_calls and opponents_have_bid and not partner_has_bid:
@@ -491,7 +694,7 @@ def _suggest_bid_core(hand, auction, my_seat, partner_seat):
             and auction[-1][0] in opponents:
         if stats["hcp"] >= 10:
             return "XX", f"{stats['hcp']} HCP: redouble to show extra strength after their double."
-        return suggest_response_to_opening(stats, partner_calls[-1])
+        return suggest_response_to_opening(stats, partner_calls[-1], hand)
 
     # Case 5: partner opened, an opponent overcalled (not doubled), my first response.
     if partner_has_bid and not my_calls and opponents_have_bid:
@@ -501,11 +704,11 @@ def _suggest_bid_core(hand, auction, my_seat, partner_seat):
             neg_dbl = suggest_negative_double(stats, opener_bid[1:], last_opp_bid)
             if neg_dbl:
                 return neg_dbl
-        return suggest_response_to_opening(stats, partner_calls[-1])
+        return suggest_response_to_opening(stats, partner_calls[-1], hand)
 
     # Fallback: later rounds / sequences not covered above - still concrete,
     # and reasons from everything partner has shown across the whole auction.
-    return generic_fallback(stats, auction, my_seat, partner_seat)
+    return generic_fallback(hand, stats, auction, my_seat, partner_seat)
 
 
 def explain_call(seat, bid, auction_before):
@@ -520,6 +723,12 @@ def explain_call(seat, bid, auction_before):
             ]
             if opp_calls_before and opener_bid[1:] != "NT":
                 return "Negative double: shows length in the unbid major(s), asks partner to pick one."
+        own_prior_all_x = [b for s, b in auction_before if s == seat and b not in ("Pass", "X", "XX")]
+        opp_real_calls_x = [
+            (s, b) for s, b in auction_before if s not in (seat, partner_seat) and b not in ("Pass", "X", "XX")
+        ]
+        if not own_prior_all_x and not partner_prior_all and opp_real_calls_x and opp_real_calls_x[0][1] == "1NT":
+            return "DONT: single-suited hand (6+ cards) - partner bids 2♣ to ask which suit."
         if all(b == "Pass" for _, b in auction_before):
             return "Double (unusual as an opening call)."
         return "Double: shows opening-ish values and shortness in their suit - forcing, partner must bid (often takeout)."
@@ -576,6 +785,33 @@ def explain_call(seat, bid, auction_before):
             if strain == expected:
                 return f"Completes the transfer, showing {expected} for partner."
 
+    # Splinter: double jump-shift response to partner's major opening.
+    if partner_prior_all and len(partner_prior_all) == 1 and not own_prior_all:
+        p_level, p_strain = int(partner_prior_all[0][0]), partner_prior_all[0][1:]
+        if p_level == 1 and p_strain in MAJORS and strain != p_strain and strain != "NT":
+            min_legal = _legal_min_level(auction_before, strain)
+            if level >= min_legal + 2:
+                return (
+                    f"Splinter: shows {p_strain} support (4+) with a singleton or void in {strain} - "
+                    f"invites/forces slam."
+                )
+
+    # Michaels cuebid / Unusual 2NT / DONT - first call after an opponent opened.
+    prior_by_this_side = [b for s, b in auction_before if s in (seat, partner_seat)]
+    opp_real_calls = [(s, b) for s, b in auction_before if s not in (seat, partner_seat) and b not in ("Pass", "X", "XX")]
+    if not prior_by_this_side and opp_real_calls:
+        opener_bid = opp_real_calls[0][1]
+        opener_level, opener_strain = int(opener_bid[0]), opener_bid[1:]
+        if opener_strain == "NT" and opener_level == 1:
+            if bid == "2♠":
+                return "DONT: natural, 6+ spades."
+            if level == 2 and strain != "NT":
+                return f"DONT: two-suited hand, shows {strain} and a higher unbid suit."
+        elif opener_level == 1 and level == opener_level + 1 and strain == opener_strain and opener_strain != "NT":
+            return f"Michaels cuebid: shows both majors (if {opener_strain} is a minor) or the other major + an unspecified minor."
+        elif opener_level == 1 and bid == "2NT":
+            return "Unusual 2NT: shows the two lower-ranking unbid suits, 5+/5+."
+
     # Blackwood ask and ace-count responses.
     if bid == "4NT":
         real_calls = [(s, b) for s, b in auction_before if b not in ("Pass", "X", "XX")]
@@ -587,6 +823,18 @@ def explain_call(seat, bid, auction_before):
         ace_map = {"♣": "0 or 4", "♦": "1", "♥": "2", "♠": "3"}
         if strain in ace_map:
             return f"Blackwood response: shows {ace_map[strain]} ace(s)."
+
+    # Gerber ask and ace-count responses.
+    if bid == "4♣":
+        real_calls = [(s, b) for s, b in auction_before if b not in ("Pass", "X", "XX")]
+        if len(real_calls) == 1 and real_calls[0][0] == partner_seat and real_calls[0][1] in ("1NT", "2NT"):
+            return "Gerber: asks partner how many aces they hold."
+    if partner_prior_all and partner_prior_all[-1] == "4♣" and level == 4 and strain != "♣":
+        real_calls = [(s, b) for s, b in auction_before if b not in ("Pass", "X", "XX")]
+        if len(real_calls) >= 2 and real_calls[0][1] in ("1NT", "2NT"):
+            ace_map = {"♦": "0 or 4", "♥": "1", "♠": "2", "NT": "3"}
+            if strain in ace_map:
+                return f"Gerber response: shows {ace_map[strain]} ace(s)."
 
     same_seat_prior = [b for s, b in auction_before if s == seat and b not in ("Pass", "X", "XX")]
     partner_prior = [b for s, b in auction_before if s == partner_seat and b not in ("Pass", "X", "XX")]

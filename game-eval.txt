@@ -1,0 +1,86 @@
+robot played these, compare these bids with the respective game logs
+
+game1: 
+R1    N-pass    E-pass S-2spades W-pass 
+R2    N-2hearts E-pass S-3hearts W-pass
+R3    N-4hearts E-pass S-pass    W-pass 
+
+game2:
+R1    N-    E-    S-    W- 
+R2    N-    E-    S-    W-
+R3    N-    E-    S-    W- 
+
+game3:
+R1    N-    E-    S-    W- 
+R2    N-    E-    S-    W-
+R3    N-    E-    S-    W- 
+
+game4:
+R1    N-    E-    S-    W- 
+R2    N-    E-    S-    W-
+R3    N-    E-    S-    W- 
+
+game5:
+R1    N-    E-    S-    W- 
+R2    N-    E-    S-    W-
+R3    N-    E-    S-    W- 
+
+game6:
+R1    N-    E-    S-    W- 
+R2    N-    E-    S-    W-
+R3    N-    E-    S-    W- 
+
+game7:
+R1    N-    E-    S-    W- 
+R2    N-    E-    S-    W-
+R3    N-    E-    S-    W- 
+
+game8:
+R1    N-    E-    S-    W- 
+R2    N-    E-    S-    W-
+R3    N-    E-    S-    W- 
+
+game9:
+R1    N-    E-    S-    W- 
+R2    N-    E-    S-    W-
+R3    N-    E-    S-    W- 
+
+game10:
+R1    N-    E-    S-    W- 
+R2    N-    E-    S-    W-
+R3    N-    E-    S-    W- 
+
+game11:
+R1    N-    E-    S-    W- 
+R2    N-    E-    S-    W-
+R3    N-    E-    S-    W- 
+
+game12:
+R1    N-    E-    S-    W- 
+R2    N-    E-    S-    W-
+R3    N-    E-    S-    W- 
+
+game13:
+R1    N-    E-    S-    W- 
+R2    N-    E-    S-    W-
+R3    N-    E-    S-    W- 
+
+game14:
+R1    N-    E-    S-    W- 
+R2    N-    E-    S-    W-
+R3    N-    E-    S-    W- 
+
+game15:
+R1    N-    E-    S-    W- 
+R2    N-    E-    S-    W-
+R3    N-    E-    S-    W- 
+
+game16:
+R1    N-    E-    S-    W- 
+R2    N-    E-    S-    W-
+R3    N-    E-    S-    W- 
+
+game17:
+R1    N-    E-    S-    W- 
+R2    N-    E-    S-    W-
+R3    N-    E-    S-    W- 

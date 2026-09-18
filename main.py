@@ -1244,9 +1244,13 @@ class PlayScreen(ctk.CTkFrame):
             suggestion_card = None
             if controls and hand:
                 is_declaring_side = play.partnership_of(seat) == play.partnership_of(self.declarer)
+                is_opening_lead = self.trick_count == 0 and not self.controller.current_trick
+                partner_suit = (
+                    play.partner_bid_suit(self.controller.auction, seat) if is_opening_lead else None
+                )
                 suggestion_card, why = play.suggest_card(
                     hand, self.controller.current_trick, self.trump, seat,
-                    is_declaring_side, self.known_voids,
+                    is_declaring_side, self.known_voids, is_opening_lead, partner_suit,
                 )
                 self.current_suggestion_card = suggestion_card
                 if suggestion_card:
