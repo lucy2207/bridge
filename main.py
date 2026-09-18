@@ -6,6 +6,7 @@ import math
 import customtkinter as ctk
 import bidding_engine as engine
 import play_engine as play
+import game_log
 
 # ----- "Card table felt" palette (sampled from reference image) -----
 FELT_GREEN = "#237a3f"       # brighter oval table surface
@@ -139,6 +140,7 @@ class BridgeCheaterApp(ctk.CTk):
         self.current_trick = []   # list of (seat, (rank, suit))
         self.trick_leader = None
         self.current_leader = None
+        self.game_log = game_log.GameLog()
 
         self.container = ctk.CTkFrame(self, fg_color="transparent")
         self.container.pack(fill="both", expand=True)
@@ -343,6 +345,7 @@ class TableScreen(ctk.CTkFrame):
     def select_first_bidder(self, seat):
         self.controller.first_bidder = seat
         self.selected_seat = seat
+        self.controller.game_log.set_first_bidder(seat)
         self.status_label.configure(
             text=f"{seat.capitalize()} bids first."
         )
@@ -432,6 +435,11 @@ class TableScreen(ctk.CTkFrame):
         )
 
     def on_show(self):
+        if self.controller.game_log.has_content():
+            self.controller.game_log.finalize("abandoned")
+        self.controller.game_log = game_log.GameLog()
+        self.controller.game_log.set_hand("south", self.controller.player_hand)
+
         self.controller.first_bidder = None
         self.controller.auction = []
         self.controller.contract = None
@@ -452,6 +460,7 @@ class BiddingScreen(ctk.CTkFrame):
     def __init__(self, parent, controller):
         super().__init__(parent, fg_color=FELT_GREEN_DARK)
         self.controller = controller
+        self.current_suggestion_bid = None
         add_felt_background(self)
 
         # ---- header / status ----
@@ -633,6 +642,7 @@ class BiddingScreen(ctk.CTkFrame):
             self.controller.dummy_seat = play.dummy_of(declarer)
             self.controller.north_hand = []
             self.controller.pending_entry = None
+            self.controller.game_log.set_contract(level, strain, declarer, self.controller.dummy_seat)
 
             if self.controller.dummy_seat == "south":
                 self.controller.dummy_hand = list(self.controller.player_hand)
@@ -679,6 +689,8 @@ class BiddingScreen(ctk.CTkFrame):
         seat = self.current_seat()
         if seat is None or self.auction_over():
             return
+        suggested = self.current_suggestion_bid if seat == "south" else None
+        self.controller.game_log.log_bid(seat, bid, suggested)
         self.controller.auction.append((seat, bid))
         self.refresh()
 
@@ -734,6 +746,8 @@ class BiddingScreen(ctk.CTkFrame):
             if final_bid is None:
                 self.status_label.configure(text="Passed out - no contract.")
                 self.play_btn.configure(state="disabled")
+                self.controller.game_log.set_result({"NS": 0, "EW": 0}, "passed out")
+                self.controller.game_log.finalize("passed out")
             else:
                 self.status_label.configure(
                     text=f"Auction over. Final contract: {final_bid} by {seat_final.capitalize()}."
@@ -749,8 +763,10 @@ class BiddingScreen(ctk.CTkFrame):
             bid, why = engine.suggest_bid(
                 self.controller.player_hand, auction, "south", PARTNER_SEAT
             )
+            self.current_suggestion_bid = bid
             self.suggestion_label.configure(text=f"Suggested: {bid}  —  {why}")
         else:
+            self.current_suggestion_bid = None
             self.suggestion_label.configure(
                 text=f"Enter what {seat.capitalize()} actually called."
             )
@@ -893,6 +909,7 @@ class DummyEntryScreen(ctk.CTkFrame):
             self.controller.dummy_hand = list(self.selected)
         else:
             self.controller.north_hand = list(self.selected)
+        self.controller.game_log.set_hand(seat, list(self.selected))
         self.controller.pending_entry = None
         self.controller.show_frame("PlayScreen")
 
@@ -930,6 +947,8 @@ class PlayScreen(ctk.CTkFrame):
         self.dummy_seat = None
         self.trump = None
         self.animating = False
+        self.trick_count = 0
+        self.current_suggestion_card = None
 
         add_felt_background(self)
 
@@ -1001,6 +1020,7 @@ class PlayScreen(ctk.CTkFrame):
         self.dummy_seat = self.controller.dummy_seat
         self.leader = play.opening_leader(declarer)
         self.animating = False
+        self.trick_count = 0
         self._update_contract_label()
         self._redraw()
         self._update_input_panel()
@@ -1228,11 +1248,13 @@ class PlayScreen(ctk.CTkFrame):
                     hand, self.controller.current_trick, self.trump, seat,
                     is_declaring_side, self.known_voids,
                 )
+                self.current_suggestion_card = suggestion_card
                 if suggestion_card:
                     self.suggestion_label.configure(
                         text=f"Suggested: {suggestion_card[0]}{suggestion_card[1]}  —  {why}"
                     )
             else:
+                self.current_suggestion_card = None
                 self.suggestion_label.configure(text=f"Enter which card {seat.capitalize()} played.")
 
             row = ctk.CTkFrame(self.input_frame, fg_color="transparent")
@@ -1245,6 +1267,7 @@ class PlayScreen(ctk.CTkFrame):
                 draw_card_face(tile, 0, 0, card[0], SYMBOL_TO_SUITKEY[card[1]], w=46, h=64, bg=bg)
                 tile.bind("<Button-1>", lambda e, c=card, s=seat: self._play_card(s, c))
         else:
+            self.current_suggestion_card = None
             self.suggestion_label.configure(text=f"Enter which card {seat.capitalize()} played.")
             played_all = [c for s in SEATS for c in self.controller.played_cards[s]]
             unavailable = set(self.south_remaining) | set(self.dummy_remaining) | set(played_all)
@@ -1267,10 +1290,13 @@ class PlayScreen(ctk.CTkFrame):
     def _play_card(self, seat, card):
         if self.animating:
             return
-        if self.controller.current_trick:
+        if not self.controller.current_trick:
+            self.controller.game_log.start_trick(self.trick_count + 1, seat)
+        else:
             led_suit = self.controller.current_trick[0][1][1]
             if card[1] != led_suit:
                 self.known_voids[seat].add(led_suit)
+        self.controller.game_log.log_card(seat, card, self.current_suggestion_card)
         self.controller.current_trick.append((seat, card))
         self.controller.played_cards[seat].append(card)
         hand = self._hand_for_seat(seat)
@@ -1302,12 +1328,15 @@ class PlayScreen(ctk.CTkFrame):
             if i >= steps:
                 partnership = play.partnership_of(winner)
                 self.controller.tricks_won[partnership] += 1
+                self.controller.game_log.finish_trick(winner)
+                self.trick_count += 1
                 self.controller.current_trick = []
                 self.leader = winner
                 self.animating = False
                 self._update_contract_label()
                 self._redraw()
                 self._update_input_panel()
+                self._maybe_finalize_game_log()
                 return
             for seat, _ in trick:
                 start = slots[seat]
@@ -1317,6 +1346,29 @@ class PlayScreen(ctk.CTkFrame):
             self.after(25, lambda: step(i + 1))
 
         step()
+
+    def _maybe_finalize_game_log(self):
+        total_played = sum(len(self.controller.played_cards[s]) for s in SEATS)
+        if total_played < 52:
+            return
+        # Fill in the two hands we never explicitly asked for - by the end
+        # of a complete deal, everything a hidden seat played over all 13
+        # tricks IS their entire original hand.
+        for seat in SEATS:
+            if self.controller.game_log.data["hands"][seat] is None:
+                self.controller.game_log.set_hand(seat, self.controller.played_cards[seat])
+
+        level, strain, declarer = self.controller.contract
+        declarer_side = play.partnership_of(declarer)
+        other_side = "EW" if declarer_side == "NS" else "NS"
+        needed = play.tricks_needed_for_contract(level)
+        won = self.controller.tricks_won
+        if won[declarer_side] >= needed:
+            outcome = f"made by {won[declarer_side] - needed} overtrick(s)" if won[declarer_side] > needed else "made exactly"
+        else:
+            outcome = f"down {needed - won[declarer_side]}"
+        self.controller.game_log.set_result(won, outcome)
+        self.controller.game_log.finalize("completed")
 
 
 if __name__ == "__main__":

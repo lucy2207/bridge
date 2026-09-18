@@ -28,6 +28,7 @@ MAJORS = ("♠", "♥")
 MINORS = ("♣", "♦")
 SUIT_SYMBOL = {"spades": "♠", "hearts": "♥", "diamonds": "♦", "clubs": "♣"}
 SEATS = ["north", "east", "south", "west"]
+PARTNER_OF = {"north": "south", "south": "north", "east": "west", "west": "east"}
 
 
 def hand_stats(hand):
@@ -139,8 +140,114 @@ def suggest_new_suit_response(stats):
     return "Pass", "Fewer than 6 HCP: not enough to respond."
 
 
+def suggest_response_to_1nt(stats):
+    """Stayman + Jacoby transfers, per the reference: 0-7 no major -> pass;
+    0-7 with 5+ major -> transfer then pass; 8+ with a 4-card major (and no
+    5+ major) -> Stayman; 8+ with a 5+ major -> transfer, then game/invite
+    by point range; 8+ balanced/no major -> the NT ladder."""
+    hcp, lengths = stats["hcp"], stats["lengths"]
+    long_majors = [s for s in MAJORS if lengths[s] >= 5]
+    four_card_majors = [s for s in MAJORS if lengths[s] >= 4]
+
+    if hcp < 8:
+        if long_majors:
+            suit = max(long_majors, key=lambda s: lengths[s])
+            transfer_bid = "2♦" if suit == "♥" else "2♥"
+            return transfer_bid, (
+                f"Jacoby transfer to {suit}: 0-7 HCP, {lengths[suit]}+ cards - partner must bid "
+                f"{suit}, then you pass."
+            )
+        return "Pass", f"{hcp} HCP, no 5-card major: not enough to respond to 1NT."
+
+    if long_majors:
+        suit = max(long_majors, key=lambda s: lengths[s])
+        transfer_bid = "2♦" if suit == "♥" else "2♥"
+        if lengths[suit] >= 6:
+            if hcp >= 10:
+                return transfer_bid, f"Transfer to {suit}: {hcp} HCP, 6+ cards - bid game in {suit} next."
+            return transfer_bid, f"Transfer to {suit}: {hcp} HCP, 6+ cards - invite with 3{suit} next."
+        if hcp >= 10:
+            return transfer_bid, f"Transfer to {suit}: {hcp} HCP, 5 cards - bid 3NT next (partner corrects to {suit} with 3-card support)."
+        return transfer_bid, f"Transfer to {suit}: {hcp} HCP, 5 cards - bid 2NT next to invite."
+
+    if four_card_majors:
+        return "2♣", f"Stayman: {hcp} HCP, a 4-card major - asks partner to bid a 4-card major if they have one."
+
+    if hcp <= 9:
+        return "2NT", f"{hcp} HCP, balanced, no major to show: invites game."
+    if hcp <= 14:
+        return "3NT", f"{hcp} HCP, balanced, no major to show: bid game."
+    if hcp <= 16:
+        return "4NT", f"{hcp} HCP: quantitative slam try - partner bids 6NT with a maximum (17), else passes."
+    if hcp <= 18:
+        return "6NT", f"{hcp} HCP: enough for a small slam opposite 15-17."
+    return "7NT", f"{hcp} HCP: enough to try for a grand slam opposite 15-17."
+
+
+def suggest_opener_reply_to_stayman(stats):
+    lengths = stats["lengths"]
+    if lengths["♥"] >= 4:
+        return "2♥", "Stayman reply: shows 4+ hearts."
+    if lengths["♠"] >= 4:
+        return "2♠", "Stayman reply: shows 4+ spades."
+    return "2♦", "Stayman reply: denies a 4-card major."
+
+
+def suggest_opener_reply_to_transfer(transfer_bid, stats):
+    suit = "♥" if transfer_bid == "2♦" else "♠"
+    length = stats["lengths"][suit]
+    if length >= 4 and stats["hcp"] >= 17:
+        level = 3
+        return f"{level}{suit}", f"Super-accept: completes the transfer with a jump - 4+ card support and a maximum (17)."
+    return f"2{suit}", f"Completes the transfer, showing {suit} for partner (bid even if short in it)."
+
+
+def count_aces(hand):
+    return sum(1 for rank, _ in hand if rank == "A")
+
+
+def suggest_blackwood_response(hand):
+    aces = count_aces(hand)
+    bid = {0: "5♣", 1: "5♦", 2: "5♥", 3: "5♠", 4: "5♣"}[aces]
+    plural = "s" if aces != 1 else ""
+    return bid, f"Blackwood response: {aces} ace{plural}."
+
+
+def _is_blackwood_context(auction, my_seat, partner_seat):
+    """4NT is Blackwood (asking for aces) once a trump fit is agreed - but
+    a bare 4NT as the very first response to a 1NT/2NT opening is
+    quantitative instead, not Blackwood."""
+    real_calls = [(s, b) for s, b in auction if b not in ("Pass", "X", "XX")]
+    if len(real_calls) <= 2 and real_calls and real_calls[0][1] in ("1NT", "2NT"):
+        return False
+    my_suits = {b[1:] for s, b in auction if s == my_seat and b not in ("Pass", "X", "XX") and b[1:] != "NT"}
+    partner_suits = {b[1:] for s, b in auction if s == partner_seat and b not in ("Pass", "X", "XX") and b[1:] != "NT"}
+    return bool(my_suits & partner_suits)
+
+
+def suggest_negative_double(stats, opener_suit, overcall_bid):
+    """After partner's suit opening and an opponent's overcall: a double
+    shows 4+ cards in the unbid major(s), with strength scaling by the
+    level of the overcall (6+/8+/10+ HCP for 1/2/3+ level)."""
+    hcp, lengths = stats["hcp"], stats["lengths"]
+    overcall_suit = overcall_bid[1:]
+    unbid_majors = [s for s in MAJORS if s not in (opener_suit, overcall_suit) and lengths[s] >= 4]
+    if not unbid_majors:
+        return None
+    overcall_level = int(overcall_bid[0])
+    threshold = {1: 6, 2: 8}.get(overcall_level, 10)
+    if hcp >= threshold:
+        return "X", (
+            f"Negative double: {hcp} HCP, shows 4+ cards in {' and '.join(unbid_majors)} "
+            f"(the unbid major{'s' if len(unbid_majors) > 1 else ''})."
+        )
+    return None
+
+
 def suggest_response_to_opening(stats, partner_bid):
     strain = partner_bid[1:]
+    if strain == "NT" and partner_bid[0] == "1":
+        return suggest_response_to_1nt(stats)
     if strain == "NT":
         hcp = stats["hcp"]
         if hcp >= 17:
@@ -355,6 +462,21 @@ def _suggest_bid_core(hand, auction, my_seat, partner_seat):
     if not opponents_have_bid and not partner_has_bid:
         return suggest_opening(stats)
 
+    # Case 1b: I opened 1NT, and partner just replied with Stayman or a
+    # transfer - I need to complete the convention, not treat this as a
+    # fresh opening decision.
+    my_last_own_bid = next((b for b in reversed(my_calls) if b != "Pass"), None)
+    if my_last_own_bid == "1NT" and partner_calls and partner_calls[-1] != "Pass":
+        p_last = partner_calls[-1]
+        if p_last == "2♣":
+            return suggest_opener_reply_to_stayman(stats)
+        if p_last in ("2♦", "2♥"):
+            return suggest_opener_reply_to_transfer(p_last, stats)
+
+    # Case 1c: partner just asked Blackwood (4NT with an agreed trump fit).
+    if partner_calls and partner_calls[-1] == "4NT" and _is_blackwood_context(auction, my_seat, partner_seat):
+        return suggest_blackwood_response(hand)
+
     # Case 2: partner opened, no interference from opponents -> plain response.
     if partner_has_bid and not opponents_have_bid and partner_calls[-1] != "Pass":
         return suggest_response_to_opening(stats, partner_calls[-1])
@@ -373,6 +495,12 @@ def _suggest_bid_core(hand, auction, my_seat, partner_seat):
 
     # Case 5: partner opened, an opponent overcalled (not doubled), my first response.
     if partner_has_bid and not my_calls and opponents_have_bid:
+        opener_bid = next(b for b in partner_calls if b != "Pass")
+        last_opp_bid = next(b for b in reversed(opp_calls) if b != "Pass")
+        if opener_bid[1:] != "NT" and last_opp_bid[1:] != "NT":
+            neg_dbl = suggest_negative_double(stats, opener_bid[1:], last_opp_bid)
+            if neg_dbl:
+                return neg_dbl
         return suggest_response_to_opening(stats, partner_calls[-1])
 
     # Fallback: later rounds / sequences not covered above - still concrete,
@@ -381,14 +509,24 @@ def _suggest_bid_core(hand, auction, my_seat, partner_seat):
 
 
 def explain_call(seat, bid, auction_before):
+    partner_seat = PARTNER_OF[seat]
+
+    if bid == "X":
+        partner_prior_all = [b for s, b in auction_before if s == partner_seat and b not in ("Pass", "X", "XX")]
+        if partner_prior_all:
+            opener_bid = partner_prior_all[0]
+            opp_calls_before = [
+                b for s, b in auction_before if s not in (seat, partner_seat) and b not in ("Pass", "X", "XX")
+            ]
+            if opp_calls_before and opener_bid[1:] != "NT":
+                return "Negative double: shows length in the unbid major(s), asks partner to pick one."
+        if all(b == "Pass" for _, b in auction_before):
+            return "Double (unusual as an opening call)."
+        return "Double: shows opening-ish values and shortness in their suit - forcing, partner must bid (often takeout)."
     if bid == "Pass":
         if all(b == "Pass" for _, b in auction_before):
             return "Passing as an early seat: fewer than 12 HCP, no opening shape."
         return "Pass: no extra values or fit to show right now."
-    if bid == "X":
-        if all(b == "Pass" for _, b in auction_before):
-            return "Double (unusual as an opening call)."
-        return "Double: shows opening-ish values and shortness in their suit - forcing, partner must bid (often takeout)."
     if bid == "XX":
         return "Redouble: usually shows extra strength after being doubled."
 
@@ -413,8 +551,44 @@ def explain_call(seat, bid, auction_before):
             return f"Opening bid: 12-17 HCP, 5+ cards in {strain} (or longest minor)."
         return f"Opening bid at the {level}-level in {strain}."
 
+    partner_prior_all = [b for s, b in auction_before if s == partner_seat and b not in ("Pass", "X", "XX")]
+    own_prior_all = [b for s, b in auction_before if s == seat and b not in ("Pass", "X", "XX")]
+
+    # Stayman / Jacoby transfer, as a response to partner's 1NT opening.
+    if partner_prior_all == ["1NT"] and not own_prior_all:
+        if bid == "2♣":
+            return "Stayman: 8+ HCP, asks partner to bid a 4-card major if they have one."
+        if bid in ("2♦", "2♥"):
+            shown_suit = "♥" if bid == "2♦" else "♠"
+            return f"Jacoby transfer: shows 5+ cards in {shown_suit}, asks partner to bid it."
+
+    # Opener completing a Stayman/transfer sequence after their own 1NT opening.
+    if own_prior_all == ["1NT"] and len(partner_prior_all) == 1:
+        p = partner_prior_all[0]
+        if p == "2♣" and strain in MAJORS:
+            return f"Stayman reply: shows {'4+' if strain=='♥' else '4+'} cards in {strain}."
+        if p == "2♣" and bid == "2♦":
+            return "Stayman reply: denies a 4-card major."
+        if p in ("2♦", "2♥"):
+            expected = "♥" if p == "2♦" else "♠"
+            if strain == expected and level == 3:
+                return f"Super-accept: completes the transfer with a jump - 4+ card support and a maximum hand."
+            if strain == expected:
+                return f"Completes the transfer, showing {expected} for partner."
+
+    # Blackwood ask and ace-count responses.
+    if bid == "4NT":
+        real_calls = [(s, b) for s, b in auction_before if b not in ("Pass", "X", "XX")]
+        my_suits = {b[1:] for s, b in auction_before if s == seat and b not in ("Pass", "X", "XX") and b[1:] != "NT"}
+        partner_suits = {b[1:] for s, b in auction_before if s == partner_seat and b not in ("Pass", "X", "XX") and b[1:] != "NT"}
+        if my_suits & partner_suits:
+            return "Blackwood: asks partner how many aces they hold."
+    if partner_prior_all and partner_prior_all[-1] == "4NT" and level == 5 and strain != "NT":
+        ace_map = {"♣": "0 or 4", "♦": "1", "♥": "2", "♠": "3"}
+        if strain in ace_map:
+            return f"Blackwood response: shows {ace_map[strain]} ace(s)."
+
     same_seat_prior = [b for s, b in auction_before if s == seat and b not in ("Pass", "X", "XX")]
-    partner_seat = {"north": "south", "south": "north", "east": "west", "west": "east"}[seat]
     partner_prior = [b for s, b in auction_before if s == partner_seat and b not in ("Pass", "X", "XX")]
 
     if same_seat_prior:
