@@ -6,7 +6,6 @@ import math
 import customtkinter as ctk
 import bidding_engine as engine
 import play_engine as play
-import dds_engine
 
 # ----- "Card table felt" palette (sampled from reference image) -----
 FELT_GREEN = "#237a3f"       # brighter oval table surface
@@ -32,7 +31,6 @@ SUIT_SYMBOL = {"spades": "♠", "hearts": "♥", "diamonds": "♦", "clubs": "�
 SYMBOL_TO_SUITKEY = {v: k for k, v in SUIT_SYMBOL.items()}
 SUIT_COLOR = {"spades": BLACK_SUIT, "hearts": RED_SUIT, "diamonds": RED_SUIT, "clubs": BLACK_SUIT}
 RANK_ORDER = {r: i for i, r in enumerate(RANKS)}
-FULL_DECK = [(r, SUIT_SYMBOL[s]) for s in SUITS for r in RANKS]
 
 SEATS = ["north", "east", "south", "west"]
 PARTNER_SEAT = "north"   # you are always South, partner is always North
@@ -1210,44 +1208,6 @@ class PlayScreen(ctk.CTkFrame):
             return True
         return False
 
-    def _dds_context(self):
-        """Everything the DDS engine needs: which hands we know exactly,
-        how many cards remain in the hands we don't, the pool of cards
-        that could still be in those hidden hands, and known voids."""
-        known_hands = {}
-        for seat in SEATS:
-            h = self._hand_for_seat(seat)
-            if h is not None:
-                known_hands[seat] = h
-        hidden_seats = [s for s in SEATS if s not in known_hands]
-        hidden_seat_counts = {s: 13 - len(self.controller.played_cards[s]) for s in hidden_seats}
-
-        accounted = set()
-        for cards in known_hands.values():
-            accounted.update(cards)
-        for seat in SEATS:
-            accounted.update(self.controller.played_cards[seat])
-        hidden_unseen_pool = [c for c in FULL_DECK if c not in accounted]
-
-        return known_hands, hidden_unseen_pool, hidden_seat_counts
-
-    def _get_suggestion(self, seat, hand, is_declaring_side):
-        """Tries the double-dummy simulation first; falls back to the
-        fixed-heuristic engine if endplay isn't installed or the solve
-        fails for any reason, so a bad/missing install never breaks play."""
-        try:
-            known_hands, hidden_pool, hidden_counts = self._dds_context()
-            return dds_engine.suggest_card_dds(
-                hand, self.controller.current_trick, self.trump, seat,
-                known_hands, hidden_pool, hidden_counts, self.known_voids,
-            )
-        except Exception as exc:
-            card, why = play.suggest_card(
-                hand, self.controller.current_trick, self.trump, seat,
-                is_declaring_side, self.known_voids,
-            )
-            return card, f"[heuristic - DDS unavailable: {exc}] {why}"
-
     def _update_input_panel(self):
         for w in self.input_frame.winfo_children():
             w.destroy()
@@ -1264,7 +1224,10 @@ class PlayScreen(ctk.CTkFrame):
             suggestion_card = None
             if controls and hand:
                 is_declaring_side = play.partnership_of(seat) == play.partnership_of(self.declarer)
-                suggestion_card, why = self._get_suggestion(seat, hand, is_declaring_side)
+                suggestion_card, why = play.suggest_card(
+                    hand, self.controller.current_trick, self.trump, seat,
+                    is_declaring_side, self.known_voids,
+                )
                 if suggestion_card:
                     self.suggestion_label.configure(
                         text=f"Suggested: {suggestion_card[0]}{suggestion_card[1]}  —  {why}"
